@@ -64,7 +64,9 @@ jobs:
         run: |
           set -euo pipefail
           test -n "$IPA_PASSPHRASE"
-          printf '%s' "$IPA_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --output youtube.ipa --decrypt youtube.ipa.gpg
+          # Windows PowerShell pipes CRLF; this GnuPG build retains the CR in
+          # passphrases, while gh secret set strips the trailing line ending.
+          printf '%s\r' "$IPA_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --output youtube.ipa --decrypt youtube.ipa.gpg
           printf '%s  youtube.ipa\n' '1593f5ed22a99dae5ac13ea9f88c2c99bee899e6053de5c73459546e600e6543' | shasum -a 256 -c -
           unzip -tq youtube.ipa
 
