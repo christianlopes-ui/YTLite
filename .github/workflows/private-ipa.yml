@@ -1,0 +1,101 @@
+name: Build YouTube Plus from encrypted IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: Draft release holding youtube.ipa.gpg
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-ipa-build
+  cancel-in-progress: false
+
+jobs:
+  build-tweaks:
+    if: github.repository == 'christianlopes-ui/YTLite' && github.actor == 'christianlopes-ui'
+    uses: ./.github/workflows/_build_tweaks.yml
+    with:
+      enable_youpip: false
+      enable_ytuhd: false
+      enable_yq: false
+      enable_ryd: false
+      enable_ytabc: false
+      enable_demc: false
+      enable_localization: false
+      tweak_version: '6.0'
+
+  package:
+    needs: build-tweaks
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Download tweak artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: built-debs
+
+      - name: Install packaging tools
+        run: |
+          brew install gnupg
+          pipx install --force https://github.com/asdfzxcvbn/pyzule-rw/archive/main.zip
+
+      - name: Fetch encrypted IPA from draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_TAG: ${{ inputs.source_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_TAG" =~ ^private-ipa-input-[A-Za-z0-9-]+$ ]]
+          draft=$(gh release view "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)
+          test "$draft" = true
+          gh release download "$SOURCE_TAG" --repo "$GITHUB_REPOSITORY" --pattern youtube.ipa.gpg
+
+      - name: Decrypt and verify original IPA
+        env:
+          IPA_PASSPHRASE: ${{ secrets.YTLITE_IPA_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$IPA_PASSPHRASE"
+          printf '%s' "$IPA_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --output youtube.ipa --decrypt youtube.ipa.gpg
+          printf '%s  youtube.ipa\n' '1593f5ed22a99dae5ac13ea9f88c2c99bee899e6053de5c73459546e600e6543' | shasum -a 256 -c -
+          unzip -tq youtube.ipa
+
+      - name: Apply upstream metadata patch
+        run: |
+          set -euo pipefail
+          unzip -q youtube.ipa -d ipa_tmp
+          plist="$(find ipa_tmp/Payload -maxdepth 1 -name '*.app' | head -n 1)/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Delete :UIDesignRequiresCompatibility' "$plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c 'Delete :NSFaceIDUsageDescription' "$plist" 2>/dev/null || true
+          /usr/libexec/PlistBuddy -c "Add :NSFaceIDUsageDescription string 'Face ID is required to authenticate.'" "$plist"
+          (cd ipa_tmp && zip -qry ../youtube-patched.ipa .)
+
+      - name: Inject YouTube Plus
+        run: |
+          set -euo pipefail
+          cyan -i youtube-patched.ipa -o YouTubePlus_6.0_YouTube_21.44.4.ipa -uwef ytplus.deb OpenYoutubeSafariExtension.appex -n 'YouTube Plus' -b com.google.ios.youtube
+          unzip -tq YouTubePlus_6.0_YouTube_21.44.4.ipa
+
+      - name: Save output exclusively as a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "private-ytplus-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            YouTubePlus_6.0_YouTube_21.44.4.ipa \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
+            --title 'Private YouTube Plus 6.0 / YouTube 21.44.4 build' \
+            --notes 'Personal build. Keep this release in draft; do not publish.'
+
+      - name: Remove runner copies
+        if: always()
+        run: |
+          rm -f youtube.ipa youtube.ipa.gpg youtube-patched.ipa YouTubePlus_6.0_YouTube_21.44.4.ipa
+          rm -rf ipa_tmp
